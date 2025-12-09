@@ -18,6 +18,43 @@ async function getStageMap() {
   }
 }
 
+async function countDealsByStatus(status, pipeline_id) {
+  const limit = 500;
+  let start = 0;
+  let total = 0;
+
+  while (true) {
+    const query = { status, limit, start };
+    if (pipeline_id) query.pipeline_id = pipeline_id;
+
+    const r = await pipedriveRequest("GET", "/deals", { query });
+
+    if (r.status === "error") {
+      throw new Error(r.message || `Error listando deals ${status}`);
+    }
+
+    const data = Array.isArray(r.data) ? r.data : [];
+    total += data.length;
+
+    const more =
+      r.additional_data &&
+      r.additional_data.pagination &&
+      r.additional_data.pagination.more_items_in_collection;
+
+    if (!more) break;
+
+    const nextStart =
+      r.additional_data &&
+      r.additional_data.pagination &&
+      r.additional_data.pagination.next_start;
+
+    if (nextStart == null) break;
+    start = nextStart;
+  }
+
+  return total;
+}
+
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
     return res.status(405).json({ status: "error", message: "Method not allowed" });
@@ -249,21 +286,11 @@ module.exports = async (req, res) => {
 
       case "analyzePipeline": {
         try {
-          const [openRes, wonRes, lostRes] = await Promise.all([
-            pipedriveRequest("GET", "/deals", {
-              query: { status: "open", limit: 20000 },
-            }),
-            pipedriveRequest("GET", "/deals", {
-              query: { status: "won", limit: 20000 },
-            }),
-            pipedriveRequest("GET", "/deals", {
-              query: { status: "lost", limit: 20000 },
-            }),
+          const [total_abiertos, total_ganados, total_perdidos] = await Promise.all([
+            countDealsByStatus("open", pipeline_id),
+            countDealsByStatus("won", pipeline_id),
+            countDealsByStatus("lost", pipeline_id),
           ]);
-
-          const total_abiertos = Array.isArray(openRes.data) ? openRes.data.length : 0;
-          const total_ganados = Array.isArray(wonRes.data) ? wonRes.data.length : 0;
-          const total_perdidos = Array.isArray(lostRes.data) ? lostRes.data.length : 0;
 
           const data = { total_abiertos, total_ganados, total_perdidos };
 
@@ -293,5 +320,3 @@ module.exports = async (req, res) => {
       .json({ status: "error", message: err.message || "Error interno pipedrive.js" });
   }
 };
-
-
