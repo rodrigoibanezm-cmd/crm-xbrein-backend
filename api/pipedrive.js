@@ -376,6 +376,25 @@ module.exports = async (req, res) => {
         }
       }
 
+      /* ---------- COUNT DEALS (para pruebas rápidas) ---------- */
+      case "countDeals": {
+        try {
+          const statusVal = status || "open";
+          const total = await countDealsByStatus(statusVal, pipeline_id);
+
+          return res.status(200).json({
+            status: "success",
+            status_consultado: statusVal,
+            total,
+          });
+        } catch (err) {
+          return res.status(500).json({
+            status: "error",
+            message: err.message || "Error al contar deals",
+          });
+        }
+      }
+
       /* ---------- DEFAULT ---------- */
       default:
         return res.status(400).json({
