@@ -90,6 +90,33 @@ async function countDealsByStatus(status, pipeline_id) {
   return total;
 }
 
+function scoreDeal(deal) {
+  let score = 0;
+
+  const value = typeof deal.value === "number" ? deal.value : 0;
+  if (value >= 50000) score += 25;
+  else if (value >= 10000) score += 15;
+  else if (value > 0) score += 5;
+
+  const now = Date.now();
+  const addTimeStr = deal.add_time;
+  if (addTimeStr) {
+    const t = new Date(addTimeStr).getTime();
+    if (!Number.isNaN(t)) {
+      const diffDays = (now - t) / (1000 * 60 * 60 * 24);
+      if (diffDays <= 7) score += 25;
+      else if (diffDays <= 30) score += 15;
+      else if (diffDays <= 90) score += 5;
+    }
+  }
+
+  const nextActivity = deal.next_activity_date || deal.next_activity_time;
+  if (nextActivity) score += 20;
+
+  const prob = Math.min(100, score);
+  return prob;
+}
+
 /* ---------- HANDLER ---------- */
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
@@ -304,6 +331,47 @@ module.exports = async (req, res) => {
           return res.status(500).json({
             status: "error",
             message: "Error al extraer deals completos",
+          });
+        }
+      }
+
+      /* ---------- SCORE DEALS (heurístico) ---------- */
+      case "scoreDeals": {
+        try {
+          const statusVal = status || "open";
+          const maxDeals = typeof limit === "number" ? limit : 5000;
+
+          const deals = await fetchAllDeals(statusVal, pipeline_id, maxDeals);
+
+          const scored = deals.map((d) => {
+            const s = scoreDeal(d);
+            return {
+              id: d.id,
+              title: d.title,
+              value: d.value,
+              currency: d.currency,
+              status: d.status,
+              pipeline_id: d.pipeline_id,
+              stage_id: d.stage_id,
+              user_id: d.user_id,
+              add_time: d.add_time,
+              next_activity_date: d.next_activity_date,
+              next_activity_time: d.next_activity_time,
+              score: s,
+            };
+          });
+
+          scored.sort((a, b) => b.score - a.score);
+
+          return res.status(200).json({
+            status: "success",
+            total: scored.length,
+            data: scored,
+          });
+        } catch (err) {
+          return res.status(500).json({
+            status: "error",
+            message: err.message || "Error al calcular score de deals",
           });
         }
       }
