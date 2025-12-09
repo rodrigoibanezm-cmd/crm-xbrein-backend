@@ -1,19 +1,19 @@
 const { pipedriveRequest } = require("../lib/pipedriveClient");
 
+/* ---------- AUX ---------- */
 async function getStageMap() {
   try {
     const r = await pipedriveRequest("GET", "/stages", {});
     const stages = r.data || [];
-    const stageMap = {};
+    const out = {};
     for (const s of stages) {
-      stageMap[s.id] = {
+      out[s.id] = {
         name: s.name,
         pipeline_name: s.pipeline_name || "(Sin nombre)",
       };
     }
-    return stageMap;
-  } catch (err) {
-    console.error("Error obteniendo stages:", err.message);
+    return out;
+  } catch {
     return {};
   }
 }
@@ -21,13 +21,8 @@ async function getStageMap() {
 async function fetchDealsPage(status, pipeline_id, start, limit) {
   const query = { status, limit, start };
   if (pipeline_id) query.pipeline_id = pipeline_id;
-
   const r = await pipedriveRequest("GET", "/deals", { query });
-
-  if (r.status === "error") {
-    throw new Error(r.message || "Error listando deals");
-  }
-
+  if (r.status === "error") throw new Error(r.message || "Error listando deals");
   return Array.isArray(r.data) ? r.data : [];
 }
 
@@ -40,23 +35,18 @@ async function fetchAllDeals(status, pipeline_id, maxTotal) {
 
   while (more && all.length < maxTotal) {
     const remaining = maxTotal - all.length;
-    const pagesThisBatch = Math.min(
-      concurrency,
-      Math.ceil(remaining / limit)
-    );
+    const pagesThisBatch = Math.min(concurrency, Math.ceil(remaining / limit));
 
-    const promises = [];
+    const calls = [];
     for (let i = 0; i < pagesThisBatch; i++) {
-      promises.push(fetchDealsPage(status, pipeline_id, start + i * limit, limit));
+      calls.push(fetchDealsPage(status, pipeline_id, start + i * limit, limit));
     }
 
-    const results = await Promise.all(promises);
+    const results = await Promise.all(calls);
 
     for (const data of results) {
       for (const d of data) {
-        if (all.length < maxTotal) {
-          all.push(d);
-        }
+        if (all.length < maxTotal) all.push(d);
       }
       if (data.length < limit) {
         more = false;
@@ -78,12 +68,12 @@ async function countDealsByStatus(status, pipeline_id) {
   let more = true;
 
   while (more) {
-    const promises = [];
+    const calls = [];
     for (let i = 0; i < concurrency; i++) {
-      promises.push(fetchDealsPage(status, pipeline_id, start + i * limit, limit));
+      calls.push(fetchDealsPage(status, pipeline_id, start + i * limit, limit));
     }
 
-    const results = await Promise.all(promises);
+    const results = await Promise.all(calls);
 
     for (const data of results) {
       const len = data.length;
@@ -100,11 +90,10 @@ async function countDealsByStatus(status, pipeline_id) {
   return total;
 }
 
+/* ---------- HANDLER ---------- */
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
-    return res
-      .status(405)
-      .json({ status: "error", message: "Method not allowed" });
+    return res.status(405).json({ status: "error", message: "Method not allowed" });
   }
 
   const {
@@ -119,10 +108,13 @@ module.exports = async (req, res) => {
     dealData,
     pipeline_id,
   } = req.body || {};
-  let fields = req.body?.fields || ["id", "title"];
+
+  const fields = req.body?.fields || ["id", "title"];
 
   try {
     switch (action) {
+
+      /* ---------- LIST DEALS (rápido) ---------- */
       case "listDeals": {
         const limitVal = typeof limit === "number" ? limit : 20000;
         const statusVal = status || "open";
@@ -130,65 +122,42 @@ module.exports = async (req, res) => {
         const deals = await fetchAllDeals(statusVal, pipeline_id, limitVal);
         const stageMap = await getStageMap();
 
-        const slimDeals = deals.map((deal) => {
-          const clean = {};
-          for (const k of fields) clean[k] = deal[k] ?? null;
-          if ("stage_id" in clean) {
-            clean["stage_name"] = stageMap[clean.stage_id]?.name || "—";
-            clean["pipeline_name"] =
-              stageMap[clean.stage_id]?.pipeline_name || null;
+        const out = deals.map((d) => {
+          const o = {};
+          for (const k of fields) o[k] = d[k] ?? null;
+          if ("stage_id" in o) {
+            o.stage_name = stageMap[o.stage_id]?.name || "—";
+            o.pipeline_name = stageMap[o.stage_id]?.pipeline_name || null;
           }
-          return clean;
+          return o;
         });
 
-        return res.status(200).json({
-          status: "success",
-          data: slimDeals,
-        });
+        return res.status(200).json({ status: "success", data: out });
       }
 
+      /* ---------- LIST PIPELINES ---------- */
       case "listPipelines": {
         const r = await pipedriveRequest("GET", "/pipelines", {});
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
-        const pipelines = (r.data || []).map((p) => ({
+        if (r.status === "error") return res.status(500).json(r);
+        const out = (r.data || []).map((p) => ({
           id: p.id,
           name: p.name,
           url_title: p.url_title,
           active: p.active,
           order_nr: p.order_nr,
         }));
-
-        return res.status(200).json({
-          status: "success",
-          data: pipelines,
-        });
+        return res.status(200).json({ status: "success", data: out });
       }
 
+      /* ---------- LIST STAGES ---------- */
       case "listStages": {
-        if (!pipeline_id) {
-          return res.status(400).json({
-            status: "error",
-            message: "pipeline_id es obligatorio para listStages",
-          });
-        }
+        if (!pipeline_id)
+          return res.status(400).json({ status: "error", message: "pipeline_id requerido" });
 
-        const r = await pipedriveRequest(
-          "GET",
-          `/stages?pipeline_id=${pipeline_id}`,
-          {}
-        );
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
+        const r = await pipedriveRequest("GET", `/stages?pipeline_id=${pipeline_id}`, {});
+        if (r.status === "error") return res.status(500).json(r);
 
-        const stages = (r.data || []).map((s) => ({
+        const out = (r.data || []).map((s) => ({
           id: s.id,
           name: s.name,
           pipeline_id: s.pipeline_id,
@@ -196,179 +165,112 @@ module.exports = async (req, res) => {
           active_flag: s.active_flag,
         }));
 
-        return res.status(200).json({ status: "success", data: stages });
+        return res.status(200).json({ status: "success", data: out });
       }
 
+      /* ---------- MOVE DEAL ---------- */
       case "moveDealToStage": {
-        if (!dealId || !stageId) {
-          return res.status(400).json({
-            status: "error",
-            message: "dealId y stageId son obligatorios",
-          });
-        }
+        if (!dealId || !stageId)
+          return res.status(400).json({ status: "error", message: "dealId y stageId requeridos" });
 
         const r = await pipedriveRequest("PUT", `/deals/${dealId}`, {
           body: { stage_id: stageId },
         });
 
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
+        if (r.status === "error") return res.status(500).json(r);
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* ---------- CREATE ACTIVITY ---------- */
       case "createActivity": {
-        if (!activityData || typeof activityData !== "object") {
-          return res.status(400).json({
-            status: "error",
-            message: "activityData es obligatorio",
-          });
-        }
+        if (!activityData)
+          return res.status(400).json({ status: "error", message: "activityData requerido" });
 
-        const r = await pipedriveRequest("POST", "/activities", {
-          body: activityData,
-        });
-
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
+        const r = await pipedriveRequest("POST", "/activities", { body: activityData });
+        if (r.status === "error") return res.status(500).json(r);
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* ---------- ADD NOTE ---------- */
       case "addNoteToDeal": {
-        if (!dealId || !noteText) {
-          return res.status(400).json({
-            status: "error",
-            message: "dealId y noteText son obligatorios",
-          });
-        }
+        if (!dealId || !noteText)
+          return res.status(400).json({ status: "error", message: "dealId y noteText requeridos" });
 
         const r = await pipedriveRequest("POST", "/notes", {
           body: { deal_id: dealId, content: noteText },
         });
 
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
+        if (r.status === "error") return res.status(500).json(r);
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* ---------- SEARCH DEALS ---------- */
       case "searchDeals": {
-        if (!term) {
-          return res.status(400).json({
-            status: "error",
-            message: "term es obligatorio",
-          });
-        }
+        if (!term)
+          return res.status(400).json({ status: "error", message: "term requerido" });
 
-        const query = {
-          term,
-          fields: "title",
-          exact_match: false,
-        };
-
+        const query = { term, fields: "title", exact_match: false };
         const r = await pipedriveRequest("GET", "/deals/search", { query });
 
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
+        if (r.status === "error") return res.status(500).json(r);
 
-        const results = (r.data?.items || []).map((item) => ({
-          id: item.item?.id,
-          title: item.item?.title,
-          status: item.item?.status,
-          pipeline_id: item.item?.pipeline_id,
-          stage_id: item.item?.stage_id,
+        const out = (r.data?.items || []).map((x) => ({
+          id: x.item?.id,
+          title: x.item?.title,
+          status: x.item?.status,
+          pipeline_id: x.item?.pipeline_id,
+          stage_id: x.item?.stage_id,
         }));
 
-        return res.status(200).json({ status: "success", data: results });
+        return res.status(200).json({ status: "success", data: out });
       }
 
+      /* ---------- GET DEAL ---------- */
       case "getDeal": {
-        if (!dealId) {
-          return res.status(400).json({
-            status: "error",
-            message: "dealId es obligatorio",
-          });
-        }
+        if (!dealId)
+          return res.status(400).json({ status: "error", message: "dealId requerido" });
 
         const r = await pipedriveRequest("GET", `/deals/${dealId}`, {});
-
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
+        if (r.status === "error") return res.status(500).json(r);
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* ---------- UPDATE DEAL ---------- */
       case "updateDeal": {
-        if (!dealId || !dealData || typeof dealData !== "object") {
-          return res.status(400).json({
-            status: "error",
-            message: "dealId y dealData son obligatorios",
-          });
-        }
+        if (!dealId || !dealData)
+          return res.status(400).json({ status: "error", message: "dealId y dealData requeridos" });
 
         const r = await pipedriveRequest("PUT", `/deals/${dealId}`, {
           body: dealData,
         });
 
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
+        if (r.status === "error") return res.status(500).json(r);
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* ---------- CREATE DEAL ---------- */
       case "createDeal": {
-        if (!dealData || typeof dealData !== "object") {
-          return res.status(400).json({
-            status: "error",
-            message: "dealData es obligatorio",
-          });
-        }
+        if (!dealData)
+          return res.status(400).json({ status: "error", message: "dealData requerido" });
 
-        const r = await pipedriveRequest("POST", "/deals", {
-          body: dealData,
-        });
-
-        if (r.status === "error") {
-          return res
-            .status(500)
-            .json({ status: "error", message: r.message });
-        }
-
+        const r = await pipedriveRequest("POST", "/deals", { body: dealData });
+        if (r.status === "error") return res.status(500).json(r);
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* ---------- ANALYZE PIPELINE (rápido) ---------- */
       case "analyzePipeline": {
         try {
-          const [total_abiertos, total_ganados, total_perdidos] =
-            await Promise.all([
-              countDealsByStatus("open", pipeline_id),
-              countDealsByStatus("won", pipeline_id),
-              countDealsByStatus("lost", pipeline_id),
-            ]);
+          const [open, won, lost] = await Promise.all([
+            countDealsByStatus("open", pipeline_id),
+            countDealsByStatus("won", pipeline_id),
+            countDealsByStatus("lost", pipeline_id),
+          ]);
 
           const data = {
-            total_abiertos,
-            total_ganados,
-            total_perdidos,
+            total_abiertos: open,
+            total_ganados: won,
+            total_perdidos: lost,
           };
 
           return res.status(200).json({
@@ -379,8 +281,7 @@ module.exports = async (req, res) => {
             datos: data,
             data,
           });
-        } catch (error) {
-          console.error("Error analyzePipeline:", error);
+        } catch {
           return res.status(500).json({
             status: "error",
             message: "Error al analizar pipeline",
@@ -388,6 +289,26 @@ module.exports = async (req, res) => {
         }
       }
 
+      /* ---------- EXTRACT FULL DEALS (ML) ---------- */
+      case "extractFullDeals": {
+        try {
+          const statusVal = status || undefined;
+          const all = await fetchAllDeals(statusVal, pipeline_id, 200000);
+
+          return res.status(200).json({
+            status: "success",
+            total: all.length,
+            data: all,
+          });
+        } catch {
+          return res.status(500).json({
+            status: "error",
+            message: "Error al extraer deals completos",
+          });
+        }
+      }
+
+      /* ---------- DEFAULT ---------- */
       default:
         return res.status(400).json({
           status: "error",
