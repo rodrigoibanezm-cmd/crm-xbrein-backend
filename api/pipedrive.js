@@ -1,5 +1,8 @@
 const { pipedriveRequest } = require("../lib/pipedriveClient");
 
+/* -------------------------------------------------------
+   AUX: MAPA DE ETAPAS
+------------------------------------------------------- */
 async function getStageMap() {
   try {
     const r = await pipedriveRequest("GET", "/stages", {});
@@ -18,6 +21,11 @@ async function getStageMap() {
   }
 }
 
+/* -------------------------------------------------------
+   AUX: PAGINACIÓN REAL PARA CUENTAS SIN METADATA
+   - Pipedrive devuelve EXACTAMENTE "limit" items por página.
+   - Si devuelve < limit → fin.
+------------------------------------------------------- */
 async function countDealsByStatus(status, pipeline_id) {
   const limit = 500;
   let start = 0;
@@ -30,34 +38,30 @@ async function countDealsByStatus(status, pipeline_id) {
     const r = await pipedriveRequest("GET", "/deals", { query });
 
     if (r.status === "error") {
-      throw new Error(r.message || `Error listando deals ${status}`);
+      throw new Error(r.message || `Error listando deals (${status})`);
     }
 
     const data = Array.isArray(r.data) ? r.data : [];
     total += data.length;
 
-    const more =
-      r.additional_data &&
-      r.additional_data.pagination &&
-      r.additional_data.pagination.more_items_in_collection;
+    // FIN: cuando llega menos del límite
+    if (data.length < limit) break;
 
-    if (!more) break;
-
-    const nextStart =
-      r.additional_data &&
-      r.additional_data.pagination &&
-      r.additional_data.pagination.next_start;
-
-    if (nextStart == null) break;
-    start = nextStart;
+    // avanzar manualmente
+    start += limit;
   }
 
   return total;
 }
 
+/* -------------------------------------------------------
+   HANDLER PRINCIPAL
+------------------------------------------------------- */
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
-    return res.status(405).json({ status: "error", message: "Method not allowed" });
+    return res
+      .status(405)
+      .json({ status: "error", message: "Method not allowed" });
   }
 
   const {
@@ -76,19 +80,21 @@ module.exports = async (req, res) => {
 
   try {
     switch (action) {
+      /* -------------------------------------------------------
+         LIST DEALS (SIN PAGINACIÓN AVANZADA)
+      ------------------------------------------------------- */
       case "listDeals": {
         const limitVal = typeof limit === "number" ? limit : 20000;
         const statusVal = status || "open";
 
         const query = { status: statusVal, limit: limitVal };
-        if (pipeline_id) {
-          query.pipeline_id = pipeline_id;
-        }
+        if (pipeline_id) query.pipeline_id = pipeline_id;
 
         const r = await pipedriveRequest("GET", "/deals", { query });
-
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         const stageMap = await getStageMap();
@@ -98,18 +104,27 @@ module.exports = async (req, res) => {
           for (const k of fields) clean[k] = deal[k] ?? null;
           if ("stage_id" in clean) {
             clean["stage_name"] = stageMap[clean.stage_id]?.name || "—";
-            clean["pipeline_name"] = stageMap[clean.stage_id]?.pipeline_name || null;
+            clean["pipeline_name"] =
+              stageMap[clean.stage_id]?.pipeline_name || null;
           }
           return clean;
         });
 
-        return res.status(200).json({ status: "success", data: slimDeals });
+        return res.status(200).json({
+          status: "success",
+          data: slimDeals,
+        });
       }
 
+      /* -------------------------------------------------------
+         LISTAR PIPELINES
+      ------------------------------------------------------- */
       case "listPipelines": {
         const r = await pipedriveRequest("GET", "/pipelines", {});
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         const pipelines = (r.data || []).map((p) => ({
@@ -120,19 +135,32 @@ module.exports = async (req, res) => {
           order_nr: p.order_nr,
         }));
 
-        return res.status(200).json({ status: "success", data: pipelines });
+        return res.status(200).json({
+          status: "success",
+          data: pipelines,
+        });
       }
 
+      /* -------------------------------------------------------
+         LISTAR STAGES DE UN PIPELINE
+      ------------------------------------------------------- */
       case "listStages": {
         if (!pipeline_id) {
-          return res
-            .status(400)
-            .json({ status: "error", message: "pipeline_id es obligatorio para listStages" });
+          return res.status(400).json({
+            status: "error",
+            message: "pipeline_id es obligatorio para listStages",
+          });
         }
 
-        const r = await pipedriveRequest("GET", `/stages?pipeline_id=${pipeline_id}`, {});
+        const r = await pipedriveRequest(
+          "GET",
+          `/stages?pipeline_id=${pipeline_id}`,
+          {}
+        );
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         const stages = (r.data || []).map((s) => ({
@@ -146,11 +174,14 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: "success", data: stages });
       }
 
+      /* -------------------------------------------------------
+         MOVER DEAL
+      ------------------------------------------------------- */
       case "moveDealToStage": {
         if (!dealId || !stageId) {
           return res.status(400).json({
             status: "error",
-            message: "dealId y stageId son obligatorios para moveDealToStage",
+            message: "dealId y stageId son obligatorios",
           });
         }
 
@@ -159,34 +190,46 @@ module.exports = async (req, res) => {
         });
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* -------------------------------------------------------
+         CREAR ACTIVIDAD
+      ------------------------------------------------------- */
       case "createActivity": {
         if (!activityData || typeof activityData !== "object") {
           return res.status(400).json({
             status: "error",
-            message: "activityData (objeto) es obligatorio para createActivity",
+            message: "activityData es obligatorio",
           });
         }
 
-        const r = await pipedriveRequest("POST", "/activities", { body: activityData });
+        const r = await pipedriveRequest("POST", "/activities", {
+          body: activityData,
+        });
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* -------------------------------------------------------
+         AGREGAR NOTA
+      ------------------------------------------------------- */
       case "addNoteToDeal": {
         if (!dealId || !noteText) {
           return res.status(400).json({
             status: "error",
-            message: "dealId y noteText son obligatorios para addNoteToDeal",
+            message: "dealId y noteText son obligatorios",
           });
         }
 
@@ -195,17 +238,23 @@ module.exports = async (req, res) => {
         });
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* -------------------------------------------------------
+         SEARCH
+      ------------------------------------------------------- */
       case "searchDeals": {
         if (!term) {
-          return res
-            .status(400)
-            .json({ status: "error", message: "term es obligatorio para searchDeals" });
+          return res.status(400).json({
+            status: "error",
+            message: "term es obligatorio",
+          });
         }
 
         const query = {
@@ -217,7 +266,9 @@ module.exports = async (req, res) => {
         const r = await pipedriveRequest("GET", "/deals/search", { query });
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         const results = (r.data?.items || []).map((item) => ({
@@ -231,27 +282,36 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: "success", data: results });
       }
 
+      /* -------------------------------------------------------
+         GET DEAL
+      ------------------------------------------------------- */
       case "getDeal": {
         if (!dealId) {
-          return res
-            .status(400)
-            .json({ status: "error", message: "dealId es obligatorio para getDeal" });
+          return res.status(400).json({
+            status: "error",
+            message: "dealId es obligatorio",
+          });
         }
 
         const r = await pipedriveRequest("GET", `/deals/${dealId}`, {});
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* -------------------------------------------------------
+         UPDATE DEAL
+      ------------------------------------------------------- */
       case "updateDeal": {
         if (!dealId || !dealData || typeof dealData !== "object") {
           return res.status(400).json({
             status: "error",
-            message: "dealId y dealData (objeto) son obligatorios para updateDeal",
+            message: "dealId y dealData son obligatorios",
           });
         }
 
@@ -260,17 +320,23 @@ module.exports = async (req, res) => {
         });
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* -------------------------------------------------------
+         CREATE DEAL
+      ------------------------------------------------------- */
       case "createDeal": {
         if (!dealData || typeof dealData !== "object") {
-          return res
-            .status(400)
-            .json({ status: "error", message: "dealData (objeto) es obligatorio para createDeal" });
+          return res.status(400).json({
+            status: "error",
+            message: "dealData es obligatorio",
+          });
         }
 
         const r = await pipedriveRequest("POST", "/deals", {
@@ -278,21 +344,31 @@ module.exports = async (req, res) => {
         });
 
         if (r.status === "error") {
-          return res.status(500).json({ status: "error", message: r.message });
+          return res
+            .status(500)
+            .json({ status: "error", message: r.message });
         }
 
         return res.status(200).json({ status: "success", data: r.data });
       }
 
+      /* -------------------------------------------------------
+         ANALYZE PIPELINE — versión XBREIN (con paginación real)
+      ------------------------------------------------------- */
       case "analyzePipeline": {
         try {
-          const [total_abiertos, total_ganados, total_perdidos] = await Promise.all([
-            countDealsByStatus("open", pipeline_id),
-            countDealsByStatus("won", pipeline_id),
-            countDealsByStatus("lost", pipeline_id),
-          ]);
+          const [total_abiertos, total_ganados, total_perdidos] =
+            await Promise.all([
+              countDealsByStatus("open", pipeline_id),
+              countDealsByStatus("won", pipeline_id),
+              countDealsByStatus("lost", pipeline_id),
+            ]);
 
-          const data = { total_abiertos, total_ganados, total_perdidos };
+          const data = {
+            total_abiertos,
+            total_ganados,
+            total_perdidos,
+          };
 
           return res.status(200).json({
             status: "success",
@@ -303,7 +379,7 @@ module.exports = async (req, res) => {
             data,
           });
         } catch (error) {
-          console.error("Error analyzePipeline Xbrein:", error);
+          console.error("Error analyzePipeline:", error);
           return res.status(500).json({
             status: "error",
             message: "Error al analizar pipeline",
@@ -311,12 +387,19 @@ module.exports = async (req, res) => {
         }
       }
 
+      /* -------------------------------------------------------
+         DEFAULT
+      ------------------------------------------------------- */
       default:
-        return res.status(400).json({ status: "error", message: `Accion desconocida: ${action}` });
+        return res.status(400).json({
+          status: "error",
+          message: `Accion desconocida: ${action}`,
+        });
     }
   } catch (err) {
-    return res
-      .status(500)
-      .json({ status: "error", message: err.message || "Error interno pipedrive.js" });
+    return res.status(500).json({
+      status: "error",
+      message: err.message || "Error interno pipedrive.js",
+    });
   }
 };
