@@ -247,37 +247,42 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: "success", data: r.data });
       }
 
-      case 'analyzePipeline': {
-  try {
-    const [openRes, wonRes, lostRes] = await Promise.all([
-      pipedriveRequest('GET', '/deals', { status: 'open', limit: 20000 }),
-      pipedriveRequest('GET', '/deals', { status: 'won', limit: 20000 }),
-      pipedriveRequest('GET', '/deals', { status: 'lost', limit: 20000 }),
-    ]);
+      case "analyzePipeline": {
+        try {
+          const [openRes, wonRes, lostRes] = await Promise.all([
+            pipedriveRequest("GET", "/deals", {
+              query: { status: "open", limit: 20000 },
+            }),
+            pipedriveRequest("GET", "/deals", {
+              query: { status: "won", limit: 20000 },
+            }),
+            pipedriveRequest("GET", "/deals", {
+              query: { status: "lost", limit: 20000 },
+            }),
+          ]);
 
-    const total_abiertos = Array.isArray(openRes.data) ? openRes.data.length : 0;
-    const total_ganados = Array.isArray(wonRes.data) ? wonRes.data.length : 0;
-    const total_perdidos = Array.isArray(lostRes.data) ? lostRes.data.length : 0;
+          const total_abiertos = Array.isArray(openRes.data) ? openRes.data.length : 0;
+          const total_ganados = Array.isArray(wonRes.data) ? wonRes.data.length : 0;
+          const total_perdidos = Array.isArray(lostRes.data) ? lostRes.data.length : 0;
 
-    const data = { total_abiertos, total_ganados, total_perdidos };
+          const data = { total_abiertos, total_ganados, total_perdidos };
 
-    return res.status(200).json({
-      status: 'success',
-      message: 'OK',
-      ok: true,
-      conexion_ok: true,
-      datos: data,
-      data,
-    });
-  } catch (error) {
-    console.error('Error analyzePipeline Xbrein:', error);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Error al analizar pipeline',
-    });
-  }
-}
-
+          return res.status(200).json({
+            status: "success",
+            message: "OK",
+            ok: true,
+            conexion_ok: true,
+            datos: data,
+            data,
+          });
+        } catch (error) {
+          console.error("Error analyzePipeline Xbrein:", error);
+          return res.status(500).json({
+            status: "error",
+            message: "Error al analizar pipeline",
+          });
+        }
+      }
 
       default:
         return res.status(400).json({ status: "error", message: `Accion desconocida: ${action}` });
@@ -288,4 +293,5 @@ module.exports = async (req, res) => {
       .json({ status: "error", message: err.message || "Error interno pipedrive.js" });
   }
 };
+
 
