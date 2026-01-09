@@ -18,6 +18,18 @@ async function getStageMap() {
   }
 }
 
+async function getUserMap() {
+  try {
+    const r = await pipedriveRequest("GET", "/users", {});
+    const users = r.data || [];
+    const out = {};
+    for (const u of users) out[u.id] = u.name || u.email || null;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 async function fetchDealsPageMeta(status, pipeline_id, start, limit) {
   const query = { status, limit, start };
   if (pipeline_id) query.pipeline_id = pipeline_id;
@@ -168,7 +180,7 @@ module.exports = async (req, res) => {
     maxTotal,
   } = req.body || {};
 
-  const fields = req.body?.fields; // (schema 1.4.0 exige fields en listDeals)
+  const fields = req.body?.fields; // (schema exige fields en listDeals)
 
   try {
     switch (action) {
@@ -188,7 +200,9 @@ module.exports = async (req, res) => {
           alertas.push("status=all agregado desde open+won+lost.");
         }
         if (sampleN > 0) {
-          alertas.push("sample está deshabilitado por defecto; si se usa, debe ser determinista (pendiente).");
+          alertas.push(
+            "sample está deshabilitado por defecto; si se usa, debe ser determinista (pendiente)."
+          );
         }
 
         const stageMap = await getStageMap();
@@ -281,7 +295,7 @@ module.exports = async (req, res) => {
               }
             }
 
-            // corte seguro por meta
+            // corte seguro
             if (results.some((x) => !x.more)) more = false;
 
             start += concurrency * pageLimit;
@@ -329,13 +343,26 @@ module.exports = async (req, res) => {
         const deals = await fetchAllDeals(statusVal, pipeline_id, limitVal);
         const stageMap = await getStageMap();
 
+        // Solo si se pidió owner_name (evita llamada extra)
+        const needsOwnerName = fields.includes("owner_name");
+        const userMap = needsOwnerName ? await getUserMap() : null;
+
         const out = deals.map((d) => {
           const o = {};
           for (const k of fields) o[k] = d[k] ?? null;
+
           if ("stage_id" in o) {
             o.stage_name = stageMap[o.stage_id]?.name || "—";
             o.pipeline_name = stageMap[o.stage_id]?.pipeline_name || null;
           }
+
+          // UX FIX: owner_name se calcula aunque user_id NO venga en fields
+          if (needsOwnerName) {
+            const uid =
+              typeof d.user_id === "object" ? d.user_id?.id ?? null : d.user_id ?? null;
+            o.owner_name = uid != null ? userMap?.[uid] || null : null;
+          }
+
           return o;
         });
 
@@ -454,8 +481,7 @@ module.exports = async (req, res) => {
 
       /* ---------- SEARCH DEALS ---------- */
       case "searchDeals": {
-        if (!term)
-          return res.status(400).json({ status: "error", message: "term requerido" });
+        if (!term) return res.status(400).json({ status: "error", message: "term requerido" });
 
         const query = { term, fields: "title", exact_match: false };
         const r = await pipedriveRequest("GET", "/deals/search", { query });
@@ -481,8 +507,7 @@ module.exports = async (req, res) => {
 
       /* ---------- GET DEAL ---------- */
       case "getDeal": {
-        if (!dealId)
-          return res.status(400).json({ status: "error", message: "dealId requerido" });
+        if (!dealId) return res.status(400).json({ status: "error", message: "dealId requerido" });
 
         const r = await pipedriveRequest("GET", `/deals/${dealId}`, {});
         if (r.status === "error") return res.status(500).json(r);
