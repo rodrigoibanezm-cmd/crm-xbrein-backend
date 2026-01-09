@@ -304,7 +304,9 @@ module.exports = async (req, res) => {
 
         if (currencyMixed) {
           currency = null;
-          alertas.push("Hay múltiples monedas en el universo; totalValue es suma nominal (currency=null).");
+          alertas.push(
+            "Hay múltiples monedas en el universo; totalValue es suma nominal (currency=null)."
+          );
         }
 
         const byStage = Object.values(byStageAgg).sort((a, b) => {
@@ -325,6 +327,69 @@ module.exports = async (req, res) => {
             sample, // vacío por diseño
           },
           alertas,
+        });
+      }
+
+      /* ---------- OPEN DEALS BY OWNER (agregados por vendedor) ---------- */
+      case "openDealsByOwner": {
+        const statusVal = status || "open";
+        const hardCap = clampInt(limit, 5000, 1, 20000);
+
+        const deals = await fetchAllDeals(statusVal, pipeline_id, hardCap);
+        const userMap = await getUserMap();
+
+        const byOwner = {};
+        let currency = null;
+        let currencyMixed = false;
+
+        for (const d of deals) {
+          const uid =
+            typeof d.user_id === "object" ? d.user_id?.id ?? null : d.user_id ?? null;
+
+          const ownerId = uid ?? null;
+          const ownerName = ownerId != null ? userMap?.[ownerId] || null : null;
+
+          const key = String(ownerId ?? "null");
+
+          if (!byOwner[key]) {
+            byOwner[key] = {
+              owner_id: ownerId,
+              owner_name: ownerName,
+              count: 0,
+              totalValue: 0,
+            };
+          }
+
+          byOwner[key].count += 1;
+
+          const v = typeof d.value === "number" ? d.value : 0;
+          byOwner[key].totalValue += v;
+
+          if (d.currency) {
+            if (currency === null) currency = d.currency;
+            else if (currency !== d.currency) currencyMixed = true;
+          }
+        }
+
+        const rows = Object.values(byOwner).sort(
+          (a, b) => (b.totalValue || 0) - (a.totalValue || 0)
+        );
+
+        return res.status(200).json({
+          status: "success",
+          ok: true,
+          intent: "openDealsByOwner",
+          datos: {
+            status: statusVal,
+            pipeline_id: pipeline_id ?? null,
+            currency: currencyMixed ? null : currency,
+            currencyMixed,
+            byOwner: rows,
+          },
+          data: rows,
+          alertas: currencyMixed
+            ? ["Hay múltiples monedas; totales nominales por vendedor, currency=null."]
+            : [],
         });
       }
 
