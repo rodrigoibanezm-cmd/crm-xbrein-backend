@@ -178,6 +178,9 @@ module.exports = async (req, res) => {
     sample_n,
     // extractFullDeals
     maxTotal,
+    // forecastByOwner optional inputs
+    days7,
+    days30,
   } = req.body || {};
 
   const fields = req.body?.fields; // (schema exige fields en listDeals)
@@ -382,6 +385,114 @@ module.exports = async (req, res) => {
           datos: {
             status: statusVal,
             pipeline_id: pipeline_id ?? null,
+            currency: currencyMixed ? null : currency,
+            currencyMixed,
+            byOwner: rows,
+          },
+          data: rows,
+          alertas: currencyMixed
+            ? ["Hay múltiples monedas; totales nominales por vendedor, currency=null."]
+            : [],
+        });
+      }
+
+      /* ---------- FORECAST BY OWNER (agregados + buckets 7/30) ---------- */
+      case "forecastByOwner": {
+        const statusVal = status || "open";
+        const hardCap = clampInt(limit, 5000, 1, 20000);
+
+        let d7 = clampInt(days7, 7, 1, 365);
+        let d30 = clampInt(days30, 30, 1, 365);
+        if (d30 < d7) d30 = d7; // micro-ajuste: evitar inputs absurdos
+
+        const deals = await fetchAllDeals(statusVal, pipeline_id, hardCap);
+        const userMap = await getUserMap();
+
+        const byOwner = {};
+        let currency = null;
+        let currencyMixed = false;
+
+        const now = Date.now();
+        const msDay = 24 * 60 * 60 * 1000;
+
+        for (const d of deals) {
+          const uid =
+            typeof d.user_id === "object" ? d.user_id?.id ?? null : d.user_id ?? null;
+
+          const ownerId = uid ?? null;
+          const ownerName = ownerId != null ? userMap?.[ownerId] || null : null;
+          const key = String(ownerId ?? "null");
+
+          if (!byOwner[key]) {
+            byOwner[key] = {
+              owner_id: ownerId,
+              owner_name: ownerName,
+              count: 0,
+              totalValue: 0,
+              weightedValue: 0,
+
+              due_7d_count: 0,
+              due_7d_value: 0,
+              due_30d_count: 0,
+              due_30d_value: 0,
+
+              unknown_probability_count: 0,
+              unknown_close_date_count: 0,
+            };
+          }
+
+          const row = byOwner[key];
+          row.count += 1;
+
+          const value = typeof d.value === "number" ? d.value : 0;
+          row.totalValue += value;
+
+          // moneda
+          if (d.currency) {
+            if (currency === null) currency = d.currency;
+            else if (currency !== d.currency) currencyMixed = true;
+          }
+
+          // probability -> weightedValue
+          const pRaw = d.probability;
+          const pNum = typeof pRaw === "number" ? pRaw : Number(pRaw);
+          if (Number.isFinite(pNum)) {
+            const p = Math.max(0, Math.min(100, pNum));
+            row.weightedValue += value * (p / 100);
+          } else {
+            row.unknown_probability_count += 1;
+          }
+
+          // expected_close_date -> buckets 7/30
+          const t = parseTimeMs(d.expected_close_date);
+          if (t != null) {
+            const diffDays = Math.floor((t - now) / msDay);
+            if (diffDays >= 0 && diffDays <= d7) {
+              row.due_7d_count += 1;
+              row.due_7d_value += value;
+            }
+            if (diffDays >= 0 && diffDays <= d30) {
+              row.due_30d_count += 1;
+              row.due_30d_value += value;
+            }
+          } else {
+            row.unknown_close_date_count += 1;
+          }
+        }
+
+        const rows = Object.values(byOwner).sort(
+          (a, b) => (b.weightedValue || 0) - (a.weightedValue || 0)
+        );
+
+        return res.status(200).json({
+          status: "success",
+          ok: true,
+          intent: "forecastByOwner",
+          datos: {
+            status: statusVal,
+            pipeline_id: pipeline_id ?? null,
+            days7: d7,
+            days30: d30,
             currency: currencyMixed ? null : currency,
             currencyMixed,
             byOwner: rows,
