@@ -1,4 +1,9 @@
 const { pipedriveRequest } = require("../lib/pipedriveClient");
+const {
+  fetchDealsPageMeta,
+  fetchAllDeals,
+  countDealsByStatus,
+} = require("../lib/pipedrive/pagination");
 
 /* ---------- AUX ---------- */
 async function getStageMap() {
@@ -28,85 +33,6 @@ async function getUserMap() {
   } catch {
     return {};
   }
-}
-
-async function fetchDealsPageMeta(status, pipeline_id, start, limit) {
-  const query = { status, limit, start };
-  if (pipeline_id) query.pipeline_id = pipeline_id;
-
-  const r = await pipedriveRequest("GET", "/deals", { query });
-  if (r.status === "error") throw new Error(r.message || "Error listando deals");
-
-  const data = Array.isArray(r.data) ? r.data : [];
-  const more =
-    r.additional_data?.pagination?.more_items_in_collection === true ||
-    r.additional_data?.pagination?.more_items_in_collection === 1;
-
-  return { data, more };
-}
-
-async function fetchAllDeals(status, pipeline_id, maxTotal) {
-  const limit = 500;
-  const concurrency = 5;
-  let start = 0;
-  const all = [];
-  let more = true;
-
-  while (more && all.length < maxTotal) {
-    const remaining = maxTotal - all.length;
-    const pagesThisBatch = Math.min(concurrency, Math.ceil(remaining / limit));
-
-    const calls = [];
-    for (let i = 0; i < pagesThisBatch; i++) {
-      calls.push(fetchDealsPageMeta(status, pipeline_id, start + i * limit, limit));
-    }
-
-    const results = await Promise.all(calls);
-
-    for (const page of results) {
-      for (const d of page.data) {
-        if (all.length < maxTotal) all.push(d);
-      }
-      if (!page.more) {
-        more = false;
-        break;
-      }
-    }
-
-    start += pagesThisBatch * limit;
-  }
-
-  return all;
-}
-
-async function countDealsByStatus(status, pipeline_id) {
-  const limit = 500;
-  const concurrency = 5;
-  let start = 0;
-  let total = 0;
-  let more = true;
-
-  while (more) {
-    const calls = [];
-    for (let i = 0; i < concurrency; i++) {
-      calls.push(fetchDealsPageMeta(status, pipeline_id, start + i * limit, limit));
-    }
-
-    const results = await Promise.all(calls);
-
-    // corte temprano si vienen vacías
-    if (results.some((x) => x.data.length === 0)) more = false;
-
-    // sumamos todo lo que vino
-    for (const page of results) total += page.data.length;
-
-    // corte seguro: si cualquiera dice "no more", terminamos
-    if (results.some((x) => !x.more)) more = false;
-
-    start += concurrency * limit;
-  }
-
-  return total;
 }
 
 function scoreDeal(deal) {
@@ -172,30 +98,24 @@ module.exports = async (req, res) => {
     term,
     dealData,
     pipeline_id,
-    // openDealsStats
     aging_days,
     top_n,
     sample_n,
-    // extractFullDeals
     maxTotal,
-    // forecastByOwner optional inputs
     days7,
     days30,
   } = req.body || {};
 
-  const fields = req.body?.fields; // (schema exige fields en listDeals)
+  const fields = req.body?.fields;
 
   try {
     switch (action) {
-      /* ---------- OPEN DEALS STATS (payload chico, determinista) ---------- */
       case "openDealsStats": {
         const statusVal = status || "open";
         const statuses = statusVal === "all" ? ["open", "won", "lost"] : [statusVal];
 
         const agingDays = clampInt(aging_days, 30, 1, 365);
         const topN = clampInt(top_n, 20, 1, 50);
-
-        // sample: eliminado por defecto (determinismo + payload)
         const sampleN = clampInt(sample_n, 0, 0, 200);
 
         const alertas = [];
@@ -210,15 +130,13 @@ module.exports = async (req, res) => {
 
         const stageMap = await getStageMap();
 
-        // agregados globales
         let count = 0;
         let totalValue = 0;
 
-        const byStageAgg = {}; // stageId -> {stageId, stageName, count, value}
+        const byStageAgg = {};
         const topAging = [];
-        const sample = []; // se mantiene por contrato, pero vacío (sampleN=0)
+        const sample = [];
 
-        // currency handling
         let currency = null;
         let currencyMixed = false;
 
@@ -244,13 +162,11 @@ module.exports = async (req, res) => {
                 const v = typeof d.value === "number" ? d.value : 0;
                 totalValue += v;
 
-                // currency
                 if (d.currency) {
                   if (currency === null) currency = d.currency;
                   else if (currency !== d.currency) currencyMixed = true;
                 }
 
-                // byStage
                 const sid = typeof d.stage_id === "number" ? d.stage_id : null;
                 if (!byStageAgg[sid]) {
                   byStageAgg[sid] = {
@@ -263,7 +179,6 @@ module.exports = async (req, res) => {
                 byStageAgg[sid].count += 1;
                 byStageAgg[sid].value += v;
 
-                // aging: update_time fallback add_time
                 const tUpdate = parseTimeMs(d.update_time);
                 const tAdd = parseTimeMs(d.add_time);
                 const base = tUpdate ?? tAdd;
@@ -273,7 +188,6 @@ module.exports = async (req, res) => {
                   if (aging < 0) aging = 0;
                 }
 
-                // topAging: solo si supera umbral
                 if (aging >= agingDays) {
                   upsertTopAging(
                     topAging,
@@ -290,17 +204,10 @@ module.exports = async (req, res) => {
                     topN
                   );
                 }
-
-                // sample eliminado (si algún día se re-activa, debe ser determinista)
-                if (sampleN > 0) {
-                  // intencionalmente no se llena
-                }
               }
             }
 
-            // corte seguro
             if (results.some((x) => !x.more)) more = false;
-
             start += concurrency * pageLimit;
           }
         }
@@ -327,13 +234,12 @@ module.exports = async (req, res) => {
             currency,
             byStage,
             topAging,
-            sample, // vacío por diseño
+            sample,
           },
           alertas,
         });
       }
 
-      /* ---------- OPEN DEALS BY OWNER (agregados por vendedor) ---------- */
       case "openDealsByOwner": {
         const statusVal = status || "open";
         const hardCap = clampInt(limit, 5000, 1, 20000);
@@ -351,7 +257,6 @@ module.exports = async (req, res) => {
 
           const ownerId = uid ?? null;
           const ownerName = ownerId != null ? userMap?.[ownerId] || null : null;
-
           const key = String(ownerId ?? "null");
 
           if (!byOwner[key]) {
@@ -396,14 +301,13 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- FORECAST BY OWNER (agregados + buckets 7/30) ---------- */
       case "forecastByOwner": {
         const statusVal = status || "open";
         const hardCap = clampInt(limit, 5000, 1, 20000);
 
         let d7 = clampInt(days7, 7, 1, 365);
         let d30 = clampInt(days30, 30, 1, 365);
-        if (d30 < d7) d30 = d7; // micro-ajuste: evitar inputs absurdos
+        if (d30 < d7) d30 = d7;
 
         const deals = await fetchAllDeals(statusVal, pipeline_id, hardCap);
         const userMap = await getUserMap();
@@ -430,12 +334,10 @@ module.exports = async (req, res) => {
               count: 0,
               totalValue: 0,
               weightedValue: 0,
-
               due_7d_count: 0,
               due_7d_value: 0,
               due_30d_count: 0,
               due_30d_value: 0,
-
               unknown_probability_count: 0,
               unknown_close_date_count: 0,
             };
@@ -447,13 +349,11 @@ module.exports = async (req, res) => {
           const value = typeof d.value === "number" ? d.value : 0;
           row.totalValue += value;
 
-          // moneda
           if (d.currency) {
             if (currency === null) currency = d.currency;
             else if (currency !== d.currency) currencyMixed = true;
           }
 
-          // probability -> weightedValue
           const pRaw = d.probability;
           const pNum = typeof pRaw === "number" ? pRaw : Number(pRaw);
           if (Number.isFinite(pNum)) {
@@ -463,7 +363,6 @@ module.exports = async (req, res) => {
             row.unknown_probability_count += 1;
           }
 
-          // expected_close_date -> buckets 7/30
           const t = parseTimeMs(d.expected_close_date);
           if (t != null) {
             const diffDays = Math.floor((t - now) / msDay);
@@ -504,7 +403,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- LIST DEALS (rápido) ---------- */
       case "listDeals": {
         if (!Array.isArray(fields) || fields.length < 1) {
           return res.status(400).json({
@@ -519,7 +417,6 @@ module.exports = async (req, res) => {
         const deals = await fetchAllDeals(statusVal, pipeline_id, limitVal);
         const stageMap = await getStageMap();
 
-        // Solo si se pidió owner_name (evita llamada extra)
         const needsOwnerName = fields.includes("owner_name");
         const userMap = needsOwnerName ? await getUserMap() : null;
 
@@ -532,7 +429,6 @@ module.exports = async (req, res) => {
             o.pipeline_name = stageMap[o.stage_id]?.pipeline_name || null;
           }
 
-          // UX FIX: owner_name se calcula aunque user_id NO venga en fields
           if (needsOwnerName) {
             const uid =
               typeof d.user_id === "object" ? d.user_id?.id ?? null : d.user_id ?? null;
@@ -551,7 +447,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- LIST PIPELINES ---------- */
       case "listPipelines": {
         const r = await pipedriveRequest("GET", "/pipelines", {});
         if (r.status === "error") return res.status(500).json(r);
@@ -573,7 +468,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- LIST STAGES ---------- */
       case "listStages": {
         if (!pipeline_id)
           return res.status(400).json({ status: "error", message: "pipeline_id requerido" });
@@ -598,7 +492,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- MOVE DEAL ---------- */
       case "moveDealToStage": {
         if (!dealId || !stageId)
           return res.status(400).json({ status: "error", message: "dealId y stageId requeridos" });
@@ -618,7 +511,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- CREATE ACTIVITY ---------- */
       case "createActivity": {
         if (!activityData)
           return res.status(400).json({ status: "error", message: "activityData requerido" });
@@ -635,7 +527,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- ADD NOTE ---------- */
       case "addNoteToDeal": {
         if (!dealId || !noteText)
           return res.status(400).json({ status: "error", message: "dealId y noteText requeridos" });
@@ -655,7 +546,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- SEARCH DEALS ---------- */
       case "searchDeals": {
         if (!term) return res.status(400).json({ status: "error", message: "term requerido" });
 
@@ -681,9 +571,9 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- GET DEAL ---------- */
       case "getDeal": {
-        if (!dealId) return res.status(400).json({ status: "error", message: "dealId requerido" });
+        if (!dealId)
+          return res.status(400).json({ status: "error", message: "dealId requerido" });
 
         const r = await pipedriveRequest("GET", `/deals/${dealId}`, {});
         if (r.status === "error") return res.status(500).json(r);
@@ -697,7 +587,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- UPDATE DEAL ---------- */
       case "updateDeal": {
         if (!dealId || !dealData)
           return res.status(400).json({ status: "error", message: "dealId y dealData requeridos" });
@@ -714,7 +603,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- CREATE DEAL ---------- */
       case "createDeal": {
         if (!dealData)
           return res.status(400).json({ status: "error", message: "dealData requerido" });
@@ -731,7 +619,6 @@ module.exports = async (req, res) => {
         });
       }
 
-      /* ---------- ANALYZE PIPELINE (conteos deterministas) ---------- */
       case "analyzePipeline": {
         try {
           const [open, won, lost] = await Promise.all([
@@ -758,7 +645,6 @@ module.exports = async (req, res) => {
         }
       }
 
-      /* ---------- EXTRACT FULL DEALS (ML) ---------- */
       case "extractFullDeals": {
         try {
           const statusVal = status || "open";
@@ -782,7 +668,6 @@ module.exports = async (req, res) => {
         }
       }
 
-      /* ---------- SCORE DEALS (heurístico) ---------- */
       case "scoreDeals": {
         try {
           const statusVal = status || "open";
@@ -826,7 +711,6 @@ module.exports = async (req, res) => {
         }
       }
 
-      /* ---------- COUNT DEALS (para pruebas rápidas) ---------- */
       case "countDeals": {
         try {
           const statusVal = status || "open";
@@ -848,7 +732,6 @@ module.exports = async (req, res) => {
         }
       }
 
-      /* ---------- DEFAULT ---------- */
       default:
         return res.status(400).json({
           status: "error",
