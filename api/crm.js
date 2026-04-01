@@ -8,6 +8,9 @@ const { topRiskDeals } = require("../lib/pipedrive/topRiskDeals");
 const { priorityDeals } = require("../lib/pipedrive/priorityDeals");
 const { wonPatternAnalysis } = require("../lib/pipedrive/wonPatternAnalysis");
 const { forecastSummary } = require("../lib/pipedrive/forecastSummary");
+const { activityDisciplineAudit } = require("../lib/pipedrive/activityDisciplineAudit");
+const { successFactorsAnalysis } = require("../lib/pipedrive/successFactorsAnalysis");
+const { improvementPlan } = require("../lib/pipedrive/improvementPlan");
 const { crmExecutiveAudit } = require("../lib/pipedrive/crmExecutiveAudit");
 
 async function getStageMap() {
@@ -133,6 +136,37 @@ module.exports = async (req, res) => {
           nowMs,
           days7,
           days30,
+        });
+        return res.status(200).json(result);
+      }
+
+      case "activityDisciplineAudit": {
+        const result = await activityDisciplineAudit({
+          pipeline_id,
+          getUserMap,
+          getStageMap,
+          nowMs,
+          stale_days_threshold: days,
+          top_n,
+        });
+        return res.status(200).json(result);
+      }
+
+      case "successFactorsAnalysis": {
+        const result = await successFactorsAnalysis({
+          pipeline_id,
+          top_n,
+        });
+        return res.status(200).json(result);
+      }
+
+      case "improvementPlan": {
+        const result = await improvementPlan({
+          pipeline_id,
+          getUserMap,
+          getStageMap,
+          nowMs,
+          top_n,
         });
         return res.status(200).json(result);
       }
