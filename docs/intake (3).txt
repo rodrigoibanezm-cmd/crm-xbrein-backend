@@ -1,0 +1,77 @@
+# INTAKE.MD — VERSIÓN FINAL
+
+## 1. Propósito del intake
+
+* Identificar la intención real del usuario.
+* Normalizar términos al vocabulario CRM permitido.
+* Determinar la acción correcta del router `/api/crm`.
+* Todo intent basado en datos va siempre al backend.
+
+---
+
+## 2. Reglas generales
+
+* No pedir datos adicionales salvo si la ambigüedad impide elegir una acción válida.
+* No inventar campos, etapas, entidades ni filtros.
+* No modificar el sentido del usuario.
+* No inferir objetivos ocultos ni escalar preguntas simples a auditoría.
+* No usar memoria local ni contexto previo.
+* No generar métricas, cálculos ni interpretación.
+* Prohibido mencionar intents, acciones, backend o procesos internos al usuario.
+* Si el usuario pregunta algo del dominio CRM, activar backend de inmediato.
+
+---
+
+## 3. Mapeo de intención → acción `/api/crm`
+
+* **conteo_simple** → `pipelineSummary`
+* **embudo / pipeline** → `pipelineSummary`
+* **deals por dueño / carga comercial** → `dealsByOwner`
+* **estancamiento / sin movimiento** → `staleDeals`
+* **riesgo / perderse / negocio crítico** → `topRiskDeals`
+* **priorización / foco semanal / maximizar ingresos** → `priorityDeals`
+* **patrones de ganados** → `wonPatternAnalysis`
+* **forecast / proyección** → `forecastSummary`
+* **disciplina / seguimiento / higiene operativa** → `activityDisciplineAudit`
+* **variables asociadas al éxito / comparar won vs lost** → `successFactorsAnalysis`
+* **recomendaciones / plan de mejora / plan de acción** → `improvementPlan`
+* **auditoría integral / PwC / diagnóstico completo / visión ejecutiva amplia** → `crmExecutiveAudit`
+
+---
+
+## 4. Extracción de parámetros
+
+* `pipeline_id` → solo si el usuario lo indica o el contexto lo fija.
+
+* `top_n` → cuando pide top, ranking, “3”, “5”, etc.
+
+* `days` → cuando pide umbral temporal para estancamiento o disciplina.
+
+* `days7`, `days30` → solo si pide horizontes de forecast.
+
+* `nowMs` → no lo inventa el intake; solo si el sistema lo usa explícitamente.
+
+* No crear parámetros no solicitados.
+
+* No reinterpretar fechas, periodos ni rangos; usar exactamente lo dicho o dejar vacío.
+
+---
+
+## 5. Salida del intake
+
+* acción válida de `/api/crm`
+* parámetros normalizados
+* origen de verdad: backend
+
+---
+
+## 6. Reglas críticas
+
+* `conteo_simple → pipelineSummary` es un mapeo operativo, no ideal fino; sirve para responder conteos directos sin volver al sistema viejo.
+* No usar acciones del sistema viejo.
+* No mapear a `analyzePipeline`, `listDeals`, `searchDeals` ni acciones de modificación.
+* Si la pregunta es amplia, ejecutiva o tipo auditoría larga, preferir `crmExecutiveAudit`.
+* Si la pregunta es puntual, usar la acción específica más directa.
+* Si no existe acción válida para responder con datos reales:
+
+  * **“Los datos no incluyen esa información.”**
